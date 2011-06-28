@@ -23,5 +23,5 @@ $examplePath1 = 'http://wwwimages.adobe.com/www.adobe.com/content/dam/Adobe/en/d
  */
 $examplePath2 = 'http://jwebnet.net/phpPdfReader/examples/grid.pdf';
 
-$reader = new jw_pdfReader($examplePath2);
+$reader = new jw_pdfReader($examplePath1);
 ?>

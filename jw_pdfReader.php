@@ -74,7 +74,7 @@ class jw_pdfReader {
             $this->getTrailer();
             $this->getXRefInfo();
 //            $this->print_r_pre($this->xrefEntries);
-            $this->parseObject($this->xrefEntries[7]['offset']);
+//            $this->parseObject($this->xrefEntries[7]['offset']);
 
             fclose($this->fileHandle);
         }
@@ -165,6 +165,7 @@ class jw_pdfReader {
              * 
              * @todo Add ability to read XRef streams
              */
+            $this->parseObject($this->offsetXRef);
         } else {
             /**
              * This is not valid XRef information
@@ -184,7 +185,7 @@ class jw_pdfReader {
         /**
          * Find out what type of object this is
          */
-        $firstLine = fread($this->fileHandle, 100);
+        $firstLine = fread($this->fileHandle, 300);
         preg_match('#/Type/([[:alpha:]]+)#', $firstLine, $matches);
         if (!@$matches[1]) {
             $type = 'Unknown';
@@ -192,6 +193,45 @@ class jw_pdfReader {
             $type = $matches[1];
         }
         switch ($type) {
+            case 'XRef':
+                /**
+                 * This is a cross-reference stream
+                 */
+                /**
+                 * Is it a filtered stream?
+                 */
+                $filter = '';
+                preg_match('#/Filter/([[:alpha:][:digit:]]+)#', $firstLine, $matches);
+                if (!@$matches[1]) {
+                    $filter = 'None';
+                } else {
+                    $filter = $matches[1];
+                }
+                switch ($filter) {
+                    case 'None':
+                        /**
+                         * Not filtered
+                         */
+                        break;
+                    case 'FlateDecode':
+                        $options = array();
+                        /**
+                         * Filter: FlateDecode
+                         */
+                        $buffer = $this->getObjectContentStream($offset);
+                        $options = $this->getFlateDecodeOptions($firstLine);
+                        $this->filterFlateDecode($buffer, $options);
+                        break;
+                    default:
+                        /**
+                         * @todo Add support for other filters
+                         */
+                        echo 'Filter: ' . $filter . "<br>\n";
+                        echo htmlspecialchars($firstLine);
+                        throw new Exception('Filter ' . $filter . ' is not supported at this time.');
+                        break;
+                }
+                break;
             case 'XObject':
                 /**
                  * This is a graphic external object
@@ -225,17 +265,19 @@ class jw_pdfReader {
                         /**
                          * Filter: FlateDecode
                          */
+                        $buffer = $this->getObjectContentStream($offset);
                         $options = $this->getFlateDecodeOptions($firstLine);
+                        $this->filterFlateDecode($buffer, $options);
                         break;
                     default:
                         /**
                          * @todo Add support for other filters
                          */
+                        echo 'Filter: ' . $filter . "<br>\n";
+                        echo htmlspecialchars($firstLine);
                         throw new Exception('Filter ' . $filter . ' is not supported at this time.');
                         break;
                 }
-                echo 'Filter: ' . $filter . "<br>\n";
-                echo htmlspecialchars($firstLine);
                 break;
             default:
                 /**
@@ -246,6 +288,85 @@ class jw_pdfReader {
         }
     }
 
+    /**
+     * Inflates the data and send it though a filter if needed.
+     * @param string $buffer
+     * @param array $options
+     * @return string 
+     */
+    function filterFlateDecode($buffer, $options) {
+        /**
+         * Inflate the buffer
+         * Since this is not actually gzipped we need to strip the first two bytes
+         */
+        $buffer = gzinflate(substr($buffer, 2));
+        /**
+         * Check if data was predicted
+         */
+        if ($options['predictor'] > 0) {
+            switch ($options['predictor']) {
+                case 12:
+                    /**
+                     * PNG UP was used
+                     */
+                    $buffer = $this->filterUp($buffer, $options['w']);
+                    break;
+
+                default:
+                    /**
+                     * @todo Add support for the other predictors
+                     */
+                    throw new Exception('Predictor number ' . $options['predictor'] . ' is not yet supported.');
+                    break;
+            }
+        }
+        return $buffer;
+    }
+
+    function filterUp($buffer, $w) {
+        $decodedBuffer = '';
+        $rowLength = array_sum($w) + 1;
+        $rowCount = strlen($buffer) / $rowLength;
+        $upRow = array_fill(0, $rowLength, 0);
+        $tmpChr = '';
+        /**
+         * Loop though the rows
+         */
+        for ($i = 0; $i < $rowCount; $i++) {
+            $curRow = substr($buffer, 0, $rowLength);
+            $curRow = str_split($curRow);
+            $decodedRow = array();
+            /**
+             * Loop though the columns of the row
+             */
+            for ($j = 0; $j < $rowLength; $j++) {
+                if ($j == 0) {
+                    // Skip the first character, it is the predictor encoding of 2
+                    $tmpChr = ord($curRow[$j]);
+                } else {
+                    /**
+                     * Convert both curRow and upRow to dec, add them together, then convert back to bin
+                     */
+                    $tmpChr = ord($curRow[$j]) + $upRow[$j] & 0xFF;
+                }
+                $decodedRow[$j] = chr($tmpChr);
+                $upRow[$j] = ord($decodedRow[$j]);
+            }
+            $decodedRow = implode('', $decodedRow);
+            echo $this->strToDec($decodedRow)."<br>\n";
+            $decodedBuffer .= $decodedRow;
+            /**
+             * Trim the buffer to the next row
+             */
+            $curRow = substr($buffer, $rowLength, $rowLength);
+        }
+    }
+
+    /**
+     * Extracts the FlateDecode options from the dictionary
+     * @param string $dictionaryLine
+     * @return string
+     */
     function getFlateDecodeOptions($dictionaryLine) {
         $options = array();
         /**
@@ -258,12 +379,12 @@ class jw_pdfReader {
         } else {
             $predictor = $matches[1];
         }
-        $columns = array_fill(0, 3, 0);
-        preg_match('#/Columns\[([[:digit:]]) ([[:digit:]]) ([[:digit:]])\]#', $dictionaryLine, $matches);
+        $w = array_fill(0, 3, 0);
+        preg_match('#/W\[([[:digit:]]) ([[:digit:]]) ([[:digit:]])\]#', $dictionaryLine, $matches);
         if (!@$matches[1]) {
             // No Columns value, leave at default
         } else {
-            $columns = array(
+            $w = array(
                 $matches[1],
                 $matches[2],
                 $matches[3],
@@ -271,13 +392,50 @@ class jw_pdfReader {
         }
         $options = array(
             'predictor' => $predictor,
-            'columns' => $columns,
+            'w' => $w,
         );
         return $options;
     }
 
+    /**
+     * Takes the object at offset and returns the content stream
+     * @param int $offset
+     * @return string
+     */
     function getObjectContentStream($offset) {
-        
+        $buffer = '';
+        $firstLine = '';
+        $end = 0;
+        fseek($this->fileHandle, $offset);
+        $buffer = fgets($this->fileHandle);
+        while (!strpos($buffer, 'endstream')) {
+            $buffer .= fgets($this->fileHandle);
+        }
+        /**
+         * Check the Length value
+         */
+        $length = 0;
+        preg_match('#/Length ([[:digit:]]+)#', $buffer, $matches);
+        if (!@$matches[1]) {
+            // No length value, this is bad
+            throw new Exception('Unable to read the length value of the object at offset ' . $offset);
+        } else {
+            $length = $matches[1];
+        }
+        /**
+         * Cut off the stream and endstream keywords
+         */
+        $buffer = substr($buffer, strpos($buffer, 'stream') + 6);
+        $end = strpos($buffer, 'endstream');
+        $buffer = trim(substr($buffer, 0, $end));
+        /**
+         * Compare the length of buffer against the length value
+         */
+        if ($length <> strlen($buffer)) {
+            throw new Exception('The length of the stream at offset ' . $offset . ' does not match it\s length value.');
+        }
+
+        return $buffer;
     }
 
     /**
@@ -288,6 +446,14 @@ class jw_pdfReader {
         echo "<pre>\n";
         print_r($array);
         echo "</pre>\n";
+    }
+
+    function strToDec($string, $spacer = '') {
+        $hex = '';
+        for ($i = 0; $i < strlen($string); $i++) {
+            $hex .= ord($string[$i]) . $spacer;
+        }
+        return $hex;
     }
 
 }
