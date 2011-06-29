@@ -200,37 +200,7 @@ class jw_pdfReader {
                 /**
                  * Is it a filtered stream?
                  */
-                $filter = '';
-                preg_match('#/Filter/([[:alpha:][:digit:]]+)#', $firstLine, $matches);
-                if (!@$matches[1]) {
-                    $filter = 'None';
-                } else {
-                    $filter = $matches[1];
-                }
-                switch ($filter) {
-                    case 'None':
-                        /**
-                         * Not filtered
-                         */
-                        break;
-                    case 'FlateDecode':
-                        $options = array();
-                        /**
-                         * Filter: FlateDecode
-                         */
-                        $buffer = $this->getObjectContentStream($offset);
-                        $options = $this->getFlateDecodeOptions($firstLine);
-                        $this->filterFlateDecode($buffer, $options);
-                        break;
-                    default:
-                        /**
-                         * @todo Add support for other filters
-                         */
-                        echo 'Filter: ' . $filter . "<br>\n";
-                        echo htmlspecialchars($firstLine);
-                        throw new Exception('Filter ' . $filter . ' is not supported at this time.');
-                        break;
-                }
+                $this->parseObjectXRefSream($offset, $firstLine);
                 break;
             case 'XObject':
                 /**
@@ -267,7 +237,7 @@ class jw_pdfReader {
                          */
                         $buffer = $this->getObjectContentStream($offset);
                         $options = $this->getFlateDecodeOptions($firstLine);
-                        $this->filterFlateDecode($buffer, $options);
+                        $buffer = $this->filterFlateDecode($buffer, $options);
                         break;
                     default:
                         /**
@@ -286,6 +256,105 @@ class jw_pdfReader {
                 throw new Exception('Unable to read object type on stream at offset ' . $offset);
                 break;
         }
+    }
+
+    function parseObjectXRefSream($offset, $dictionary) {
+        $filter = '';
+        preg_match('#/Filter/([[:alpha:][:digit:]]+)#', $dictionary, $matches);
+        if (!@$matches[1]) {
+            $filter = 'None';
+        } else {
+            $filter = $matches[1];
+        }
+        switch ($filter) {
+            case 'None':
+                /**
+                 * Not filtered
+                 */
+                break;
+            case 'FlateDecode':
+                $objId = 0;
+                $objType = '';
+                $objOffset = '';
+                $objGen = '';
+                $w = array();
+                $options = array();
+                $tmpObject = array();
+                /**
+                 * Filter: FlateDecode
+                 */
+                $buffer = $this->getObjectContentStream($offset);
+                $options = $this->getFlateDecodeOptions($dictionary);
+                $buffer = $this->filterFlateDecode($buffer, $options);
+                $rowLength = array_sum($options['w']) + 1;
+                $rowCount = strlen($buffer) / $rowLength;
+
+                $w = $options['w'];
+
+                for ($i = 0; $i < $rowCount; $i++) {
+                    $row = substr($buffer, 0, $rowLength);
+                    /**
+                     * Trim the first byte off
+                     */
+                    $row = substr($row, 1);
+                    $objType = hexdec(bin2hex(substr($row, 0, $w[0])));
+                    $objOffset = hexdec(bin2hex(substr($row, $w[0], $w[1])));
+                    $objGen = hexdec(bin2hex(substr($row, $w[0] + $w[1])));
+                    switch ($objType) {
+                        case 0:
+                            $objId = 'NULL';
+                        case 1:
+                            $objId = $this->getObjectIdByOffset($objOffset);
+                            break;
+                        case 2:
+                            $results = array();
+                            $this->loopAndFind($this->pdfObjects, 'id', $objOffset, $results);
+//                            echo 'Results.';
+//                            $this->print_r_pre($results);
+                            $objId = $results[0]['offset'];
+                            break;
+                    }
+                    $tmpObject = array(
+                        'id' => $objId,
+                        'type' => $objType,
+                        'offset' => $objOffset,
+                        'gen' => $objGen,
+                    );
+                    $this->pdfObjects[] = $tmpObject;
+                    $buffer = substr($buffer, $rowLength);
+                }
+                $this->print_r_pre($this->pdfObjects);
+                break;
+            default:
+                /**
+                 * @todo Add support for other filters
+                 */
+                echo 'Filter: ' . $filter . "<br>\n";
+                echo htmlspecialchars($dictionary);
+                throw new Exception('Filter ' . $filter . ' is not supported at this time.');
+                break;
+        }
+    }
+
+    /**
+     * Takes an object offset and return the id number
+     * @param int $offset
+     * @return int 
+     */
+    function getObjectIdByOffset($offset) {
+        $objId = 0;
+        $firstLine = '';
+        /**
+         * Start at offset
+         */
+        fseek($this->fileHandle, $offset);
+        /**
+         * Find out what type of object this is
+         */
+        $firstLine = fread($this->fileHandle, 300);
+        preg_match('/([[:digit:]]+) [[:digit:]]+ obj/', $firstLine, $matches);
+        $objId = $matches[1];
+        return $objId;
     }
 
     /**
@@ -323,6 +392,12 @@ class jw_pdfReader {
         return $buffer;
     }
 
+    /**
+     * Preforms PNG UP de-prediction on buffer
+     * @param string $buffer
+     * @param array $w
+     * @return string 
+     */
     function filterUp($buffer, $w) {
         $decodedBuffer = '';
         $rowLength = array_sum($w) + 1;
@@ -334,6 +409,7 @@ class jw_pdfReader {
          */
         for ($i = 0; $i < $rowCount; $i++) {
             $curRow = substr($buffer, 0, $rowLength);
+
             $curRow = str_split($curRow);
             $decodedRow = array();
             /**
@@ -353,13 +429,13 @@ class jw_pdfReader {
                 $upRow[$j] = ord($decodedRow[$j]);
             }
             $decodedRow = implode('', $decodedRow);
-            echo $this->strToDec($decodedRow)."<br>\n";
             $decodedBuffer .= $decodedRow;
             /**
              * Trim the buffer to the next row
              */
-            $curRow = substr($buffer, $rowLength, $rowLength);
+            $buffer = substr($buffer, $rowLength);
         }
+        return $decodedBuffer;
     }
 
     /**
@@ -454,6 +530,31 @@ class jw_pdfReader {
             $hex .= ord($string[$i]) . $spacer;
         }
         return $hex;
+    }
+
+    /**
+     * Searches an array for makthing keys and return an array of those records
+     * 
+     * @param array $array
+     * @param string $index
+     * @param string $search
+     * @param array $results
+     * @return bool 
+     */
+    function loopAndFind($array, $index, $search, &$results) {
+        $results = array();
+        foreach ($array as $k => $v) {
+            if (isset($v[$index])) {
+                if ($v[$index] == $search) {
+                    $results[] = $v;
+                }
+            }
+        }
+        if (count($results) > 0) {
+            return true;
+        } else {
+            return false;
+        }
     }
 
 }
