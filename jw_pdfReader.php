@@ -1,53 +1,19 @@
 <?php
-
-/*
- * To change this template, choose Tools | Templates
- * and open the template in the editor.
+/**
+ * @package jw_pdfReader
  */
+
 
 /**
- * Description of pdfObject
- *
- * @author Joseph
+ * @package jw_pdfReader
  */
 class jw_pdfReader {
-
-    /**
-     * Single digit representing the highest supported pdf version
-     * currently 7 (1.7)
-     * @var int
-     */
-    protected $maxSupportedVersion = 7;
-
-    /**
-     * Holds the file stream data
-     * @var string
-     */
-    protected $fileStream;
-
-    /**
-     * Holds the length of the file stream
-     * @var int
-     */
-    protected $fileLength;
 
     /**
      * Holds the file handle to the cached file.
      * @var handle
      */
     protected $fileHandle;
-
-    /**
-     * Holds the offset pointer in the file stream
-     * @var int
-     */
-    protected $filePointer;
-
-    /**
-     * Holds the pdf version number
-     * @var string
-     */
-    var $pdfVersion;
 
     /**
      * Holds the file offset of the XRef information
@@ -60,7 +26,6 @@ class jw_pdfReader {
      * @var array
      */
     var $pdfObjects = array();
-    var $offsets;
 
     /**
      * Holds the XRef table entries
@@ -68,38 +33,53 @@ class jw_pdfReader {
      */
     var $xrefEntries = array();
 
+    /**
+     * Holds the version of the pdf
+     * @var string
+     */
+    var $pdfVersion;
+
     function __construct($path = NULL) {
         if (!is_null($path)) {
-            $this->_load($path);
-            $this->getTrailer();
-            $this->getXRefInfo();
-//            $this->print_r_pre($this->xrefEntries);
-//            $this->parseObject($this->xrefEntries[7]['offset']);
 
+            $this->parseObject($this->pdfObjects[1]['offset']);
+            
             fclose($this->fileHandle);
         }
     }
 
     /**
+     * Initialize the Object
+     * @param string $path 
+     */
+    function _init($path) {
+        $this->_load($path);
+
+        $this->getTrailer();
+        $this->getVersion();
+        $this->getXRefInfo();
+    }
+
+    /**
      * Loads the pdf file
-     * @param string $path
+     * @param string $path The file path
      * @return null
      */
     protected function _load($path) {
 
         if (@fopen($path, "r") == true) {
-            $this->fileStream = file_get_contents($path);
+            $fileStream = '';
+            $fileStream = file_get_contents($path);
 
             /* remove newlines on both ends */
-            $this->fileStream = trim($this->fileStream);
-            $this->fileLength = strlen($this->fileStream);
+            $fileStream = trim($fileStream);
 
             /**
              * Save to a tempory file so we don't hold the socket open
              */
             $this->fileHandle = tmpfile();
-            fwrite($this->fileHandle, $this->fileStream);
-            $this->fileStream = '';
+            fwrite($this->fileHandle, $fileStream);
+            $fileStream = '';
             /**
              * Start at the beginning
              */
@@ -125,6 +105,18 @@ class jw_pdfReader {
 
         $this->offsetXRef = trim($lines[count($lines) - 2]);
         unset($lines);
+    }
+
+    function getVersion() {
+        $firstLine = '';
+        rewind($this->fileHandle);
+        $firstLine = fgets($this->fileHandle);
+        preg_match('#PDF-(1\.[[:digit:]])#', $firstLine, $matches);
+        if (!@$matches[1]) {
+            throw new Exception('Unable to read PDF Version number.');
+        } else {
+            $this->pdfVersion = $matches[1];
+        }
     }
 
     /**
@@ -175,6 +167,10 @@ class jw_pdfReader {
         }
     }
 
+    /**
+     * Parse the object at offset
+     * @param int $offset 
+     */
     function parseObject($offset) {
         $type = '';
         $firstLine = '';
@@ -192,6 +188,9 @@ class jw_pdfReader {
         } else {
             $type = $matches[1];
         }
+
+//        echo $firstLine;
+
         switch ($type) {
             case 'XRef':
                 /**
@@ -200,7 +199,18 @@ class jw_pdfReader {
                 /**
                  * Is it a filtered stream?
                  */
-                $this->parseObjectXRefSream($offset, $firstLine);
+                $this->parseObjectXRefStream($offset, $firstLine);
+                break;
+            case 'ObjStm':
+                /**
+                 * Object Stream
+                 */
+                $this->parseObjectObjStream($offset, $firstLine);
+                break;
+            case 'Catalog':
+                /**
+                 * Document Catalog
+                 */
                 break;
             case 'XObject':
                 /**
@@ -244,7 +254,6 @@ class jw_pdfReader {
                          * @todo Add support for other filters
                          */
                         echo 'Filter: ' . $filter . "<br>\n";
-                        echo htmlspecialchars($firstLine);
                         throw new Exception('Filter ' . $filter . ' is not supported at this time.');
                         break;
                 }
@@ -253,12 +262,18 @@ class jw_pdfReader {
                 /**
                  * We have no clue what this is
                  */
-                throw new Exception('Unable to read object type on stream at offset ' . $offset);
+                throw new Exception('We do not currently support the ' . $type . ' object type.');
+//                throw new Exception('Unable to read object type on stream at offset ' . $offset);
                 break;
         }
     }
 
-    function parseObjectXRefSream($offset, $dictionary) {
+    /**
+     * Parses an XRef Object
+     * @param int $offset
+     * @param string $dictionary 
+     */
+    function parseObjectXRefStream($offset, $dictionary) {
         $filter = '';
         preg_match('#/Filter/([[:alpha:][:digit:]]+)#', $dictionary, $matches);
         if (!@$matches[1]) {
@@ -297,20 +312,26 @@ class jw_pdfReader {
                      * Trim the first byte off
                      */
                     $row = substr($row, 1);
-                    $objType = hexdec(bin2hex(substr($row, 0, $w[0])));
-                    $objOffset = hexdec(bin2hex(substr($row, $w[0], $w[1])));
-                    $objGen = hexdec(bin2hex(substr($row, $w[0] + $w[1])));
+                    $objType = bin2dec(substr($row, 0, $w[0]));
+                    $objOffset = bin2dec(substr($row, $w[0], $w[1]));
+                    $objGen = bin2dec(substr($row, $w[0] + $w[1]));
                     switch ($objType) {
                         case 0:
                             $objId = 'NULL';
+
                         case 1:
+                            /**
+                             * Normal object
+                             */
                             $objId = $this->getObjectIdByOffset($objOffset);
                             break;
+
                         case 2:
+                            /**
+                             * Compressed onject
+                             */
                             $results = array();
-                            $this->loopAndFind($this->pdfObjects, 'id', $objOffset, $results);
-//                            echo 'Results.';
-//                            $this->print_r_pre($results);
+                            loopAndFind($this->pdfObjects, 'id', $objOffset, $results);
                             $objId = $results[0]['offset'];
                             break;
                     }
@@ -323,7 +344,6 @@ class jw_pdfReader {
                     $this->pdfObjects[] = $tmpObject;
                     $buffer = substr($buffer, $rowLength);
                 }
-                $this->print_r_pre($this->pdfObjects);
                 break;
             default:
                 /**
@@ -334,6 +354,80 @@ class jw_pdfReader {
                 throw new Exception('Filter ' . $filter . ' is not supported at this time.');
                 break;
         }
+    }
+
+    /**
+     * Parses an Object Stream
+     * @param int $offset
+     * @param string $dictionary 
+     */
+    function parseObjectObjStream($offset, $dictionary) {
+        $filter = '';
+        /**
+         * Get the Filter value
+         */
+        preg_match('#/Filter/([[:alpha:][:digit:]]+)#', $dictionary, $matches);
+        if (!@$matches[1]) {
+            $filter = 'None';
+        } else {
+            $filter = $matches[1];
+        }
+        /**
+         * Get the count of objects in this stream
+         */
+        preg_match('#/N ([[:digit:]]+)#', $dictionary, $matches);
+        if (!@$matches[1]) {
+            throw new Exception('Unable to read the object count for the object stream at offset ' . $offset);
+        } else {
+            $count = $matches[1];
+        }
+        preg_match('#/First ([[:digit:]]+)#', $dictionary, $matches);
+        if (!@$matches[1]) {
+            throw new Exception('Unable to read the offset of the first object in the stream at offset' . $offset);
+        } else {
+            $firstOffset = $matches[1];
+        }
+        /**
+         * Fill the buffer with the content
+         */
+        $buffer = $this->getObjectContentStream($offset);
+        /**
+         * Is it filtered?
+         */
+        switch ($filter) {
+            case 'None':
+                /**
+                 * Not filtered
+                 */
+                break;
+            case 'FlateDecode':
+                $objId = 0;
+                $objType = '';
+                $objOffset = '';
+                $objGen = '';
+                $w = array();
+                $options = array();
+                $tmpObject = array();
+                /**
+                 * Filter: FlateDecode
+                 */
+                $options = $this->getFlateDecodeOptions($dictionary);
+                $buffer = $this->filterFlateDecode($buffer, $options);
+
+                break;
+            default:
+                /**
+                 * @todo Add support for other filters
+                 */
+                echo 'Filter: ' . $filter . "<br>\n";
+                echo htmlspecialchars($dictionary);
+                throw new Exception('Filter ' . $filter . ' is not supported at this time.');
+                break;
+        }
+
+        echo htmlspecialchars($buffer) . "<br><br>\n";
+
+        echo htmlspecialchars(substr($buffer, $firstOffset)) . "<br><br>\n";
     }
 
     /**
@@ -514,49 +608,51 @@ class jw_pdfReader {
         return $buffer;
     }
 
-    /**
-     * Encloses print_r inside <pre> tags
-     * @param array $array 
-     */
-    function print_r_pre($array) {
-        echo "<pre>\n";
-        print_r($array);
-        echo "</pre>\n";
-    }
+}
 
-    function strToDec($string, $spacer = '') {
-        $hex = '';
-        for ($i = 0; $i < strlen($string); $i++) {
-            $hex .= ord($string[$i]) . $spacer;
-        }
-        return $hex;
-    }
+/**
+ * Encloses print_r inside <pre> tags
+ * @param array $array 
+ */
+function print_r_pre($array) {
+    echo "<pre>\n";
+    print_r($array);
+    echo "</pre>\n";
+}
 
-    /**
-     * Searches an array for makthing keys and return an array of those records
-     * 
-     * @param array $array
-     * @param string $index
-     * @param string $search
-     * @param array $results
-     * @return bool 
-     */
-    function loopAndFind($array, $index, $search, &$results) {
-        $results = array();
-        foreach ($array as $k => $v) {
-            if (isset($v[$index])) {
-                if ($v[$index] == $search) {
-                    $results[] = $v;
-                }
+/**
+ * Searches an array for makthing keys and return an array of those records
+ * 
+ * @param array $array
+ * @param string $index
+ * @param string $search
+ * @param array $results
+ * @return bool 
+ */
+function loopAndFind($array, $index, $search, &$results) {
+    $results = array();
+    foreach ($array as $k => $v) {
+        if (isset($v[$index])) {
+            if ($v[$index] == $search) {
+                $results[] = $v;
             }
         }
-        if (count($results) > 0) {
-            return true;
-        } else {
-            return false;
-        }
     }
+    if (count($results) > 0) {
+        return true;
+    } else {
+        return false;
+    }
+}
 
+/**
+ * Converts a binary string into decimal
+ * @param string $string
+ * @return string
+ */
+function bin2dec($string) {
+    $string = hexdec(bin2hex($string));
+    return $string;
 }
 
 ?>
